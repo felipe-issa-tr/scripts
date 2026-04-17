@@ -28,6 +28,47 @@ _log_clear() {
     [[ "$confirm" == [yY] ]] && for dir in "${to_delete[@]}"; do rm -rf "$dir" && echo "Deleted $dir"; done
 }
 
+# --- Helper: The Tail Watchdog ---
+_log_tail() {
+    local filter_mode="$1"  # This will be "-c" or empty
+    local pattern="claudelogs|Processing custom action"
+    local limit=60
+    
+    # Always tail the absolute latest file
+    local file=$(ls -t | head -n 1)
+
+    if [ -z "$file" ]; then
+        echo "No log files found in this directory."
+        return 1
+    fi
+
+    if [[ "$filter_mode" == "-c" ]]; then
+        echo "--- Tailing & Filtering: $file ---"
+        echo "--- Applied Filters: $pattern ---"
+        { tail -f "$file" | grep --line-buffered -E "$pattern" & } 2>/dev/null
+    else
+        echo "--- Tailing: $file ---"
+        { tail -f "$file" & } 2>/dev/null
+    fi
+    
+    local tail_pid=$!
+    disown $tail_pid 
+    echo "--- Watchdog: Closing after ${limit}s of silence ---"
+
+    while true; do
+        local start_time=$(stat -c %Y "$file")
+        sleep "$limit"
+        local end_time=$(stat -c %Y "$file")
+
+        if [ "$start_time" -eq "$end_time" ]; then
+            echo -e "\n--- No updates for ${limit}s. Ending session. ---"
+            kill "$tail_pid" 2>/dev/null
+            break
+        fi
+    done
+}
+
+
 # --- Helper: Display the Help Menu ---
 _log_help() {
     echo "Usage: .log [options]"
@@ -36,6 +77,7 @@ _log_help() {
     echo "  -t         Tail (-f) the newest valid log"
     echo "  -t -c      Tail AND filter for relevant keywords"
     echo "  -c         Grep 'claudelogs' in the LATEST finished log"
+    echo "  -v         Open the LATEST finished log (>$MAX_SIZE) in VI"
     echo "  --clear    Delete log folders older than 7 days"
     echo "  -h         Show this help menu"
     echo "------------------------------------------------------------"
@@ -44,7 +86,7 @@ _log_help() {
 # --- Main Entry Point ---
 .log() {
     # --- CONFIGURATION (Constants) ---
-    local MIN_SIZE=20000
+    local MIN_SIZE=24000
     local MAX_SIZE=26000
     local SEARCH_PATTERN="claudelogs|Processing custom action"
     # ---------------------------------
@@ -79,17 +121,19 @@ _log_help() {
                 grep "claudelogs" "$file"
             fi
             ;;
-        -t)
-            local file=$(_get_latest_valid_log "$valid_filter")
+	-t)
+            # Call the helper function
+            _log_tail "$2" "$SEARCH_PATTERN" "$INACTIVITY_LIMIT"
+            ;;
+
+	-v)
+            # Find the latest file specifically larger than 26k
+            local file=$(_get_latest_valid_log "\$5 > $MAX_SIZE")
             if [ -n "$file" ]; then
-                if [[ "$2" == "-c" ]]; then
-                    echo "--- Tailing & Filtering: $file ---"
-                    echo "--- Applied Filters: $SEARCH_PATTERN ---"
-		    tail -f "$file" | grep --line-buffered -E "$SEARCH_PATTERN"
-                else
-                    echo "--- Tailing: $file ---"
-                    tail -f "$file"
-                fi
+                echo "--- Opening in VI: $file ---"
+                vi "$file"
+            else
+                echo "No finished logs (>$MAX_SIZE bytes) found."
             fi
             ;;
         *)
